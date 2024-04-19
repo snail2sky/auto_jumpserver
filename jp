@@ -1,0 +1,160 @@
+#/bin/bash
+
+# autojumpserver home
+home_dir=$(cd `dirname $0` && pwd)
+# user conf
+conf=$home_dir/user.cfg
+
+# if you want to login some host
+# you should give host pattern
+# and will send to jumpserver
+
+pat="${@:+\"$@\\r\\n\"}"
+pat="${pat:-\"\\n\"}"
+shell=`basename $SHELL`
+shell_conf=$HOME/.${shell}rc
+_first=0
+
+OS_ARCH=`uname -m`
+
+easy_run(){
+    # if home dir not in PATH, will add it
+    if echo $PATH | grep -ov "$home_dir" &> /dev/null; then
+        echo "PATH=\$PATH:$home_dir" >> $shell_conf
+        _first=1
+    fi
+}
+
+read_conf(){
+    local os_type=$(uname)
+    local type="mac"
+    username=$(sed -n "s#^username=\(.*\)#\1#p"                $conf)
+    secret=$(sed -n "s#^secret=\(.*\)#\1#p"                    $conf)
+    jumpserver=$(sed -n "s#^jumpserver=\(.*\)#\1#p"            $conf)
+    private_key=$(sed -n "s#^private_key=\(.*\)#\1#p"          $conf)
+    password=$(sed -n "s#^password=\(.*\)#\1#p"                $conf)
+    passphrase=$(sed -n "s#^passphrase=\(.*\)#\1#p"            $conf)
+    ssh_port=$(sed -n "s#^ssh_port=\(.*\)#\1#p"                $conf)
+    tmp_file=./.tmp.expect
+    private_key=${private_key:-~/.ssh/id_rsa}
+
+    if [ $os_type == Linux ]; then
+        type=linux
+        google_auth=$home_dir/.google_auth-${type}
+    else
+        google_auth=$home_dir/.google_auth-${type}-${OS_ARCH}
+    fi
+}
+
+# gen code
+gen_code(){
+    echo $secret | $google_auth
+}
+
+# make tmp expect script
+mk_tmp(){
+    cat > $tmp_file << EOF    
+    spawn ssh -i ${private_key} -p $ssh_port $username@$jumpserver
+    expect {
+        "*yes/no*" {
+            send "yes\n"
+            exp_continue
+        }
+        "*password*" {
+            send "$password\n"
+            exp_continue
+        }
+        "*passphrase*" {
+            send "$passphrase\n"
+            exp_continue
+        }
+        "*OTP*" {
+            set mfa_code [exec sh -c {echo $secret | $google_auth}]
+            send "\${mfa_code}\n"
+            exp_continue
+        }
+        "*JumpServer*" {
+            send ${pat} 
+            interact
+        }
+    }
+EOF
+}
+
+# auto connect
+auto_connect(){
+    expect $tmp_file
+}
+
+# clear 
+clear_tmp_file(){
+    # 长时间连接到jumpserver的连接，由于空闲导致连接断开
+    # 如果不使用这种方式，可能会产生一个临时的.tmp.expect文件
+    # 经我测试5秒内，绝大多数都可以连上jumpserver
+    # 而使用完expect脚本后，那个expect脚本也就没有任何用处了，删掉即可
+    sleep 5
+    rm -f $tmp_file
+}
+
+judge_conf(){
+    if [ -z "$username" ]; then
+        echo "error: No username!"
+        exit 1
+    fi
+}
+
+help(){
+    echo "Usage: $(basename $0) [{ -h | --help | mfa | jump_cmd }]"
+    cat << EOF
+- 描述: 这是一个比较简单的自动连接到跳板机(堡垒机)的工具或者脚本
+- 用法:
+        1. 你需要修改user.cfg配置文件，将用户名和你的MFA sercet修改好，如果你的
+        ssh 私钥放在非 ~/.ssh 目录下，那么你需要修改user.cfg中的private_key值
+        2. 当你修改完所有的信息之后，可以使用jp -h来查看帮助信息
+           (如果是第一次，脚本会做一些初始化的操作，如将当前目录加到环境变量中，并重启shell)
+        3. 运行jp命令，将会自动连接到user.cfg中定义的jumpserver上
+        4. 其他功能，可以使用 jp mfa 来获取当前的 MFA
+
+        想要获取更多的信息可以使用 jp --help或者查看脚本文件内容。
+
+- description: a easy connect jumpserver tools or scripts
+- usage:
+        1. you can modify the 'user.cfg' to adapt your jumpserver
+        2. run 'jp -h' you will get help info and jp script will re-exec a shell
+        3. finally, you can run 'jp'. will login jumpserver.
+        4. other function: 'jp mfa' you can get your MFA Code
+
+        get more information 'jp --help' or read source code.
+EOF
+    exit 1
+}
+
+prepare(){
+    # avoid write .${shell}rc twice
+    [ $_first -eq 1 ] && exec $shell
+}
+
+main(){
+    easy_run
+    case $1 in
+    # help
+    -h|--help)
+        help
+        ;;
+    # print mfa
+    mfa)
+        clear_tmp_file &
+        read_conf && gen_code 
+        exit 
+        ;;
+    esac
+    read_conf && judge_conf
+    clear_tmp_file &
+    mk_tmp && auto_connect
+}
+
+
+#### main ####
+prepare
+main $@
+
